@@ -10,7 +10,7 @@ DigiPhant student starter.
 
 ## Links
 
-- Git repository: _add after creating the remote_
+- Git repository: https://github.com/joykeeee/CatNapClub
 - Performance video (Google Drive): _add after uploading the checked MP4_
 
 Heavy shared assets (`Assets/Elephant`), the starter clone, the Python environment
