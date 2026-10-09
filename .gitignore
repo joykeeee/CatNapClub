@@ -1,0 +1,49 @@
+# Unity generated / local
+/[Ll]ibrary/
+/[Tt]emp/
+/[Oo]bj/
+/[Ll]ogs/
+/[Uu]ser[Ss]ettings/
+/[Bb]uild/
+/[Bb]uilds/
+/[Mm]emoryCaptures/
+/[Rr]ecordings/
+/Assets/Plugins/Editor/JetBrains*
+/Assets/AssetStoreTools*
+*.csproj
+*.unityproj
+*.sln
+*.slnx
+*.suo
+*.tmp
+*.user
+*.userprefs
+*.pidb
+*.booproj
+*.svd
+*.pdb
+*.mdb
+*.opendb
+*.VC.db
+*.pidb.meta
+*.pdb.meta
+*.mdb.meta
+sysinfo.txt
+crashlytics-build.properties
+*.apk
+*.aab
+*.unitypackage
+.DS_Store
+
+# Python
+**/.venv/
+**/__pycache__/
+
+# DigiPhant: shared starter clone and heavy supplied assets (restore per DIGIPHANT_SETUP.md)
+/DigiPhantStarter/
+/Assets/Elephant/
+/Assets/Elephant.meta
+
+# Videos and frame sequences live on Drive, never in Git
+*.mp4
+*.mov

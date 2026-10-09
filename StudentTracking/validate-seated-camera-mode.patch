@@ -1,0 +1,10 @@
+--- a/DigiPhant/Editor/DigiPhantSetup.cs
++++ b/DigiPhant/Editor/DigiPhantSetup.cs
+@@ -199,6 +199,7 @@
+             Four();
+             Check(c.performerCount == 4 && c.controls.Single(x => x.label == "Trunk curl").performer == 4, "Four-person preset failed");
+             Three();
++            c.inputMode = InputMode.Camera;
+             c.SetUpperBodyOnly(true);
+             Check(!c.IsCalibrated, "Movement mode retained calibration");
+             Check(!c.AcceptPacket(JsonUtility.ToJson(baseline), 40), "Full-body packet accepted in seated mode");

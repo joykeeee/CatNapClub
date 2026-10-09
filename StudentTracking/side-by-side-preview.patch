@@ -1,0 +1,79 @@
+--- a/DigiPhant/Runtime/DigiPhantController.cs
++++ b/DigiPhant/Runtime/DigiPhantController.cs
+@@ -53,6 +53,8 @@
+         [Min(.1f)] public float trackingTimeout = .5f;
+         public bool showControls = true;
+         public bool showCameraPreview = true;
++        [Tooltip("Split the screen right of the controls: camera preview and elephant in equal halves.")]
++        public bool sideBySidePreview = true;
+         public string Status { get; private set; } = "Test sliders ready";
+         public int ReceivedFrames { get; private set; }
+         public bool IsCalibrated { get; private set; }
+@@ -328,7 +330,16 @@
+             if (stageCamera != null)
+             {
+                 float left = showControls ? (Mathf.Min(350, Screen.width * .32f) + 20) / Mathf.Max(1, Screen.width) : 0;
++                if (SideBySide) left += (1 - left) / 2;
+                 stageCamera.rect = new Rect(left, 0, 1 - left, 1);
++            }
++        }
++        bool SideBySide
++        {
++            get
++            {
++                var preview = GetComponent<DigiPhantCameraPreview>();
++                return sideBySidePreview && showControls && preview != null && preview.showPreview;
+             }
+         }
+         void OnDisable() { calibrationDeadline = -1; StopReceiver(); GetComponent<DigiPhantLocomotion>()?.StopAnimation(); ResetControls(); }
+@@ -337,10 +348,13 @@
+             if (!showControls) return;
+             float width = Mathf.Min(350, Screen.width * .32f);
+             GUI.DrawTexture(new Rect(0, 0, width + 20, Screen.height), Texture2D.blackTexture, ScaleMode.StretchToFill, false);
++            bool sideBySide = SideBySide;
++            if (sideBySide)
++                GetComponent<DigiPhantCameraPreview>().DrawStage(new Rect(width + 20, 0, (Screen.width - width - 20) / 2, Screen.height));
+             var labelStyle = new GUIStyle(GUI.skin.label) { wordWrap = true };
+             void Label(string text) => GUILayout.Label(text, labelStyle, GUILayout.Width(width - 32));
+             GUILayout.BeginArea(new Rect(10, 10, width, Screen.height - 20), GUI.skin.box);
+-            GetComponent<DigiPhantCameraPreview>()?.DrawInline(width - 20);
++            GetComponent<DigiPhantCameraPreview>()?.DrawInline(width - 20, !sideBySide);
+             GetComponent<DigiPhantRecording>()?.DrawControls(width - 32);
+             scroll = GUILayout.BeginScrollView(scroll);
+             Label("DIGIPHANT | collective digital twin");
+--- a/DigiPhant/Runtime/DigiPhantCameraPreview.cs
++++ b/DigiPhant/Runtime/DigiPhantCameraPreview.cs
+@@ -155,19 +155,28 @@
+             lastFrame = -1000;
+         }
+         void OnDisable() => StopPreview();
+-        public void DrawInline(float width)
++        public void DrawInline(float width, bool thumbnail = true)
+         {
+             if (!showPreview) return;
+             GUILayout.Label("CAMERA PREVIEW");
+-            float height = Mathf.Min(width * .75f, Screen.height * .25f);
+-            Rect picture = GUILayoutUtility.GetRect(width, height, GUILayout.ExpandWidth(true));
+-            GUI.DrawTexture(picture, Texture2D.blackTexture, ScaleMode.StretchToFill, false);
+-            if (HasLiveFrame) GUI.DrawTexture(picture, texture, ScaleMode.ScaleToFit);
++            if (thumbnail)
++            {
++                float height = Mathf.Min(width * .75f, Screen.height * .25f);
++                Rect picture = GUILayoutUtility.GetRect(width, height, GUILayout.ExpandWidth(true));
++                GUI.DrawTexture(picture, Texture2D.blackTexture, ScaleMode.StretchToFill, false);
++                if (HasLiveFrame) GUI.DrawTexture(picture, texture, ScaleMode.ScaleToFit);
++            }
+             GUILayout.BeginHorizontal();
+             GUILayout.Label(Status, new GUIStyle(GUI.skin.label) { wordWrap = true, fontSize = 11 });
+             if (GUILayout.Button("Retry", GUILayout.Width(54))) BeginPreview();
+             GUILayout.EndHorizontal();
+         }
++        // Full-height preview beside the elephant. The bridge sends at most 320x240, so it is upscaled.
++        public void DrawStage(Rect area)
++        {
++            GUI.DrawTexture(area, Texture2D.blackTexture, ScaleMode.StretchToFill, false);
++            if (HasLiveFrame) GUI.DrawTexture(area, texture, ScaleMode.ScaleToFit);
++        }
+         void OnGUI()
+         {
+             if (!showPreview || (controller != null && controller.showControls)) return;

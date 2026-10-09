@@ -1,0 +1,395 @@
+diff --git a/DigiPhant/Runtime/DigiPhantCameraPreview.cs b/DigiPhant/Runtime/DigiPhantCameraPreview.cs
+index fdb9b20..a6f35d4 100644
+--- a/DigiPhant/Runtime/DigiPhantCameraPreview.cs
++++ b/DigiPhant/Runtime/DigiPhantCameraPreview.cs
+@@ -15,6 +15,8 @@ namespace DigiPhant
+         public bool showPreview = true;
+         [Tooltip("One performer per vertical zone (P1 leftmost in the unmirrored preview). Each zone is detected separately: finds groups more reliably, at a lower frame rate. Takes effect on Retry.")]
+         public bool useZones = true;
++        [Tooltip("Look for a hand-held bottle (DigiPhantLocomotion plays the drink clip). Needs efficientdet_lite0.tflite beside bridge.py. Takes effect on Retry.")]
++        public bool detectBottle = true;
+         public string Status { get; private set; } = "Starting camera...";
+         public bool HasLiveFrame => texture != null && Time.realtimeSinceStartup - lastFrame < 2;
+         public Texture2D PreviewTexture => HasLiveFrame ? texture : null;
+@@ -108,7 +110,8 @@ namespace DigiPhant
+                 var info = new ProcessStartInfo(executable,
+                     "-u bridge.py --no-window --people " + controller.performerCount +
+                     " --camera " + Mathf.Clamp(cameraIndex, 0, 8) + " --port " + controller.port +
+-                    (useZones ? " --zones" : ""))
++                    (useZones ? " --zones" : "") +
++                    (detectBottle && File.Exists(Path.Combine(folder, "efficientdet_lite0.tflite")) ? " --bottle" : ""))
+                 {
+                     WorkingDirectory = folder, UseShellExecute = false, CreateNoWindow = true,
+                     RedirectStandardOutput = true, RedirectStandardError = true
+diff --git a/DigiPhant/Runtime/DigiPhantController.cs b/DigiPhant/Runtime/DigiPhantController.cs
+index 5698fe8..b804270 100644
+--- a/DigiPhant/Runtime/DigiPhantController.cs
++++ b/DigiPhant/Runtime/DigiPhantController.cs
+@@ -15,6 +15,7 @@ namespace DigiPhant
+         public int slot;
+         public float[] values;
+         public float[] confidence;
++        public bool bottle;
+     }
+     [Serializable] public class PoseFrame
+     {
+@@ -63,6 +64,7 @@ namespace DigiPhant
+         readonly float[,] values = new float[4, 6];
+         readonly float[,] confidence = new float[4, 6];
+         readonly float[,] neutral = new float[4, 6];
++        readonly bool[] holdingBottle = new bool[4];
+         readonly float[] lastSeen = { -1000, -1000, -1000, -1000 };
+         readonly Dictionary<Transform, Quaternion> rest = new Dictionary<Transform, Quaternion>();
+         UdpClient socket;
+@@ -184,10 +186,12 @@ namespace DigiPhant
+                     if (!Finite(p.values[k]) || !Finite(p.confidence[k]) || p.confidence[k] < 0 || p.confidence[k] > 1) return false;
+             }
+             Array.Clear(confidence, 0, confidence.Length);
++            Array.Clear(holdingBottle, 0, holdingBottle.Length);
+             foreach (var p in frame.people)
+             {
+                 int i = p.slot - 1;
+                 lastSeen[i] = now;
++                holdingBottle[i] = p.bottle;
+                 for (int k = 0; k < 6; k++)
+                 { values[i, k] = Mathf.Clamp(p.values[k], -3, 3); confidence[i, k] = p.confidence[k]; }
+             }
+@@ -222,6 +226,9 @@ namespace DigiPhant
+             for (int k = 0; k < 6; k++) if (confidence[i, k] >= minimumConfidence) return true;
+             return false;
+         }
++        // True while the bridge sees this performer's wrist on a bottle (needs --bottle).
++        public bool IsHoldingBottle(int performer, float now) =>
++            performer >= 1 && performer <= performerCount && IsTracked(performer, now) && holdingBottle[performer - 1];
+         public void ReassignPeople()
+         {
+             ClearTracking();
+@@ -302,6 +309,8 @@ namespace DigiPhant
+             foreach (var pair in rest) if (pair.Key != null) pair.Key.localRotation = pair.Value;
+             var locomotion = GetComponent<DigiPhantLocomotion>();
+             bool animated = locomotion != null && locomotion.isActiveAndEnabled && locomotion.Evaluate(now, dt);
++            // While the elephant drinks, the clip owns every joint (P3's raised bottle hand would otherwise curl the trunk).
++            bool drinking = animated && locomotion.Drinking;
+             foreach (var c in controls)
+             {
+                 float target = 0;
+@@ -317,7 +326,7 @@ namespace DigiPhant
+                 if (c.bones == null || c.localAxis.sqrMagnitude < .0001f) continue;
+                 foreach (var bone in c.bones)
+                     if (bone != null && rest.ContainsKey(bone))
+-                        bone.localRotation *= Quaternion.AngleAxis(c.current * c.degrees * (animated ? c.locomotionWeight : 1), c.localAxis.normalized);
++                        bone.localRotation *= Quaternion.AngleAxis(c.current * c.degrees * (drinking ? 0 : animated ? c.locomotionWeight : 1), c.localAxis.normalized);
+             }
+         }
+         void LateUpdate()
+diff --git a/DigiPhant/Runtime/DigiPhantLocomotion.cs b/DigiPhant/Runtime/DigiPhantLocomotion.cs
+index bcd8589..bb8ef48 100644
+--- a/DigiPhant/Runtime/DigiPhantLocomotion.cs
++++ b/DigiPhant/Runtime/DigiPhantLocomotion.cs
+@@ -47,6 +47,12 @@ namespace DigiPhant
+         public Camera followCamera;
+         public bool followElephant = true;
+         public AnimationClip idle, walk, run, backward, turnLeft, turnRight, walkLeft, walkRight, runLeft, runRight;
++        [Header("Drink (bottle held up to the camera)")]
++        [Tooltip("Played once, in place, when the drink performer holds up a bottle. Empty disables the trigger.")]
++        public AnimationClip drink;
++        [Range(1, 4)] public int drinkPerformer = 3;
++        [Tooltip("How long the bottle must be seen before the elephant drinks.")]
++        [Min(0)] public float drinkHoldSeconds = .6f;
+         public MovementDriver forward = new MovementDriver { sources = new[] { new MovementSource { movement = Movement.LeftHandHeight } } };
+         public MovementDriver steering = new MovementDriver { sources = new[] { new MovementSource { movement = Movement.Lean } } };
+         [Min(.01f)] public float walkSpeed = 1.8f;
+@@ -63,12 +69,14 @@ namespace DigiPhant
+         public string CurrentAction { get; private set; } = "Idle";
+         public float CurrentSpeed { get; private set; }
+         public bool AnimationActive => graph.IsValid();
++        public bool Drinking => drinkTime >= 0;
+         DigiPhantController controller;
+         PlayableGraph graph;
+         AnimationMixerPlayable mixer;
+         AnimationClipPlayable[] playables;
+         AnimationClip[] clips;
+-        readonly string[] actions = { "Idle", "Walk", "Run", "Backward", "Turn left", "Turn right", "Walk left", "Walk right", "Run left", "Run right" };
++        readonly string[] actions = { "Idle", "Walk", "Run", "Backward", "Turn left", "Turn right", "Walk left", "Walk right", "Run left", "Run right", "Drink" };
++        const int DrinkAction = 10;
+         readonly Dictionary<Transform, Pose> restPose = new Dictionary<Transform, Pose>();
+         Vector3 startPosition, cameraOffset, cameraStart, motionPosition;
+         Quaternion startRotation, motionRotation;
+@@ -77,6 +85,8 @@ namespace DigiPhant
+         AnimatorCullingMode previousCulling;
+         RuntimeAnimatorController previousController;
+         float throttle, turn, cycle;
++        float drinkTime = -1, drinkClock, bottleSince = -1;
++        bool drinkArmed = true;
+ 
+         void OnEnable() { controller = GetComponent<DigiPhantController>(); }
+         public bool Initialise()
+@@ -110,7 +120,7 @@ namespace DigiPhant
+             graph = PlayableGraph.Create("DigiPhant locomotion");
+             graph.SetTimeUpdateMode(DirectorUpdateMode.Manual);
+             clips = new[] { idle, walk, run, backward, turnLeft, turnRight, walkLeft ? walkLeft : walk,
+-                walkRight ? walkRight : walk, runLeft ? runLeft : run, runRight ? runRight : run };
++                walkRight ? walkRight : walk, runLeft ? runLeft : run, runRight ? runRight : run, drink ? drink : idle };
+             mixer = AnimationMixerPlayable.Create(graph, clips.Length);
+             playables = new AnimationClipPlayable[clips.Length];
+             for (int i = 0; i < clips.Length; i++)
+@@ -144,14 +154,33 @@ namespace DigiPhant
+         }
+         public void StopMotion()
+         {
++            drinkTime = bottleSince = -1;
++            drinkArmed = true;
+             testForward = testSteering = throttle = turn = CurrentSpeed = 0;
+             CurrentAction = "Idle";
+         }
++        public void StartDrink()
++        {
++            if (drink == null || Drinking) return;
++            drinkTime = drinkClock = 0;
++            throttle = turn = 0;
++        }
++        // Drink once per raise: the bottle must be held for drinkHoldSeconds, then lowered before the next drink.
++        // Smaller groups fall back to the last performer, like the starter's trunk preset.
++        int DrinkPerformer => Mathf.Clamp(drinkPerformer, 1, controller.performerCount);
++        void UpdateDrinkTrigger(float now)
++        {
++            bool holding = controller.inputMode == InputMode.Camera && controller.IsHoldingBottle(DrinkPerformer, now);
++            if (!holding) { bottleSince = -1; drinkArmed = true; return; }
++            if (bottleSince < 0) bottleSince = now;
++            if (drinkArmed && now - bottleSince >= drinkHoldSeconds) { drinkArmed = false; StartDrink(); }
++        }
+         public bool Evaluate(float now, float dt)
+         {
+             if (!enableLocomotion) { StopAnimation(); return false; }
+             if (!StartAnimation()) return false;
+             dt = Mathf.Clamp(dt, 0, .1f);
++            UpdateDrinkTrigger(now);
+             float desiredForward = testForward, desiredTurn = testSteering;
+             bool valid = true;
+             if (controller.inputMode == InputMode.Camera)
+@@ -160,7 +189,7 @@ namespace DigiPhant
+                 bool turning = steering.TryRead(controller, now, out desiredTurn);
+                 valid = moving && turning;
+             }
+-            if (!valid) { throttle = turn = 0; }
++            if (!valid || Drinking) { throttle = turn = 0; }
+             else
+             {
+                 float blend = inputSmoothing <= 0 ? 1 : 1 - Mathf.Exp(-inputSmoothing * dt);
+@@ -174,6 +203,15 @@ namespace DigiPhant
+                 ? throttle / runThreshold * walkSpeed : Mathf.Lerp(walkSpeed, runSpeed, Mathf.InverseLerp(runThreshold, 1, throttle));
+             int action = throttle < 0 ? 3 : throttle > 0 ? (running ? 2 : 1) : turn < 0 ? 4 : turn > 0 ? 5 : 0;
+             if (throttle > 0 && Mathf.Abs(turn) > .15f) action = running ? (turn < 0 ? 8 : 9) : (turn < 0 ? 6 : 7);
++            if (Drinking)
++            {
++                // The drink clip plays once from the start, then the gait takes over again.
++                drinkTime += dt;
++                // Hold the last frame while the clip blends out.
++                drinkClock = Mathf.Min(drinkTime, drink.length);
++                if (drinkTime >= drink.length) drinkTime = -1;
++                else action = DrinkAction;
++            }
+             CurrentAction = actions[action];
+             float animationRate = action == 0 ? 1 : throttle != 0
+                 ? Mathf.Max(.15f, Mathf.Abs(CurrentSpeed) / (throttle < 0 ? backwardSpeed : running ? runSpeed : walkSpeed))
+@@ -184,7 +222,7 @@ namespace DigiPhant
+             for (int i = 0; i < clips.Length; i++)
+             {
+                 mixer.SetInputWeight(i, Mathf.Lerp(mixer.GetInputWeight(i), i == action ? 1 : 0, weightBlend));
+-                playables[i].SetTime(cycle * clips[i].length);
++                playables[i].SetTime(i == DrinkAction ? drinkClock : cycle * clips[i].length);
+             }
+             graph.Evaluate(0);
+             // The travel parent alone owns world movement. Remove exported motion-node drift.
+@@ -255,8 +293,22 @@ namespace DigiPhant
+                 GUILayout.Label("Turn: left / straight / right", label, GUILayout.Width(width));
+                 testSteering = GUILayout.HorizontalSlider(testSteering, -1, 1);
+                 if (GUILayout.Button("Stop moving")) StopMotion();
++                if (drink && GUILayout.Button("Test drink")) StartDrink();
++            }
++            else
++            {
++                GUILayout.Label("Speed and steering use the movement mappings in the Inspector.", label, GUILayout.Width(width));
++                if (drink)
++                {
++                    float now = Time.realtimeSinceStartup;
++                    string state = Drinking ? "drinking"
++                        : !controller.IsTracked(DrinkPerformer, now) ? "P" + DrinkPerformer + " not tracked"
++                        : !controller.IsHoldingBottle(DrinkPerformer, now) ? "no bottle in P" + DrinkPerformer + "'s hand"
++                        : !drinkArmed ? "lower the bottle to drink again"
++                        : "bottle seen, hold it…";
++                    GUILayout.Label("Drink: P" + DrinkPerformer + " holds up a bottle · " + state, label, GUILayout.Width(width));
++                }
+             }
+-            else GUILayout.Label("Speed and steering use the movement mappings in the Inspector.", label, GUILayout.Width(width));
+             if (GUILayout.Button("Return to starting position")) ResetPosition();
+             GUILayout.Space(8);
+         }
+diff --git a/Tracking/bridge.py b/Tracking/bridge.py
+index 9573d66..6be59cb 100644
+--- a/Tracking/bridge.py
++++ b/Tracking/bridge.py
+@@ -11,6 +11,7 @@ from types import SimpleNamespace
+ 
+ FEATURES = ('LeftHandHeight', 'RightHandHeight', 'LeftFootLift', 'RightFootLift', 'Lean', 'ArmSpread')
+ MODEL_URL = 'https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_full/float16/latest/pose_landmarker_full.task'
++OBJECT_MODEL_URL = 'https://storage.googleapis.com/mediapipe-models/object_detector/efficientdet_lite0/int8/latest/efficientdet_lite0.tflite'
+ 
+ 
+ def extract_features(landmarks, upper_body_only=False):
+@@ -114,6 +115,33 @@ def zone_choice(centers, strip):
+     return min(inside, key=lambda i: abs(centers[i][0] - middle), default=None)
+ 
+ 
++HAND_POINTS = (15, 16, 17, 18, 19, 20, 21, 22)  # wrists, pinkies, index fingers, thumbs
++
++
++def bottle_holders(boxes, hands, reach=.75):
++    """Owner of each bottle: {box index: slot} for boxes with a visible hand point nearby.
++
++    A hand point counts when it is inside the bottle box widened by `reach` box sizes.
++    boxes are (x0, y0, x1, y1) and hands {slot: [(x, y), ...]}, all in frame coordinates (0-1).
++    Each bottle goes to the slot with the hand point nearest its centre, so a bottle on a
++    table or in someone else's hand does not count for the wrong person.
++    """
++    owners = {}
++    for box, (x0, y0, x1, y1) in enumerate(boxes):
++        pad = reach * max(x1 - x0, y1 - y0)
++        centre = ((x0 + x1) / 2, (y0 + y1) / 2)
++        nearest = None
++        for slot, points in hands.items():
++            for x, y in points:
++                if x0 - pad <= x <= x1 + pad and y0 - pad <= y <= y1 + pad:
++                    distance = math.dist((x, y), centre)
++                    if nearest is None or distance < nearest[0]:
++                        nearest = (distance, slot)
++        if nearest is not None:
++            owners[box] = nearest[1]
++    return owners
++
++
+ def requested_count(data):
+     """Validate Unity's local count request without changing tracking on bad input."""
+     try:
+@@ -150,6 +178,8 @@ def main():
+     parser.add_argument('--no-window', action='store_true', help='Preview is displayed inside Unity instead')
+     parser.add_argument('--upper-body-only', action='store_true', help='Use shoulders and hands; feet and hips may be out of frame')
+     parser.add_argument('--camera', type=int, default=0)
++    parser.add_argument('--bottle', action='store_true', help='Flag performers holding a bottle (needs --object-model)')
++    parser.add_argument('--object-model', type=Path, default=Path(__file__).parent / 'efficientdet_lite0.tflite')
+     parser.add_argument('--zones', action='store_true', help='One person per vertical zone, P1 leftmost; each zone is detected separately')
+     parser.add_argument('--port', type=int, default=5055)
+     parser.add_argument('--model', type=Path, default=Path(__file__).parent / 'pose_landmarker_full.task')
+@@ -184,6 +214,17 @@ def main():
+         min_pose_detection_confidence=.5, min_pose_presence_confidence=.5,
+         min_tracking_confidence=.5)
+     zone_detectors = {}
++    bottle_detector = None
++    if args.bottle:
++        if args.object_model.exists():
++            bottle_detector = vision.ObjectDetector.create_from_options(vision.ObjectDetectorOptions(
++                base_options=python.BaseOptions(model_asset_path=str(args.object_model)),
++                running_mode=vision.RunningMode.IMAGE, max_results=4, score_threshold=.35,
++                category_allowlist=['bottle']))
++        else:
++            # Tracking still works; only the bottle trigger is unavailable.
++            print(f'Bottle detection off: {args.object_model.name} missing. Download {OBJECT_MODEL_URL}')
++    bottles, owners, held_until, next_bottle_check = [], {}, {}, 0.
+     tracker = PerformerTracker(args.people)
+     camera = cv2.VideoCapture(args.camera)
+     if not camera.isOpened():
+@@ -275,7 +316,22 @@ def main():
+                         if confidence[4] >= .5:
+                             observations.append((center, values, confidence, landmarks))
+                     assignments = tracker.assign([o[0] for o in observations])
+-                packet = {'version': 1, 'performerCount': args.people, 'upperBodyOnly': args.upper_body_only, 'people': [dict(slot=slot, values=observations[i][1], confidence=observations[i][2])
++                # About 70 ms per check on an Intel i5, so check a few times a second, not every frame.
++                if bottle_detector is not None and time.monotonic() >= next_bottle_check:
++                    next_bottle_check = time.monotonic() + .4
++                    found = bottle_detector.detect(mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb))
++                    bottles = [(d.bounding_box.origin_x / w, d.bounding_box.origin_y / h,
++                                (d.bounding_box.origin_x + d.bounding_box.width) / w,
++                                (d.bounding_box.origin_y + d.bounding_box.height) / h) for d in found.detections]
++                    hands = {slot: [(observations[i][3][k].x, observations[i][3][k].y) for k in HAND_POINTS
++                                    if min(observations[i][3][k].visibility, observations[i][3][k].presence) >= .5]
++                             for slot, i in assignments.items()}
++                    owners = bottle_holders(bottles, hands)
++                    # Keep a holder for 1 s, so one missed detection does not restart Unity's hold timer.
++                    for slot in owners.values():
++                        held_until[slot] = time.monotonic() + 1.
++                holders = {slot for slot, until in held_until.items() if until > time.monotonic()}
++                packet = {'version': 1, 'performerCount': args.people, 'upperBodyOnly': args.upper_body_only, 'people': [dict(slot=slot, values=observations[i][1], confidence=observations[i][2], bottle=slot in holders)
+                                                  for slot, i in assignments.items()]}
+                 sender.sendto(json.dumps(packet, allow_nan=False).encode(), ('127.0.0.1', args.port))
+                 # Draw every detection, even while waiting for the full group or
+@@ -321,11 +377,23 @@ def main():
+                                     (20, 20, 20), thickness + 2, cv2.LINE_AA)
+                         cv2.putText(frame, label, anchor, cv2.FONT_HERSHEY_SIMPLEX, font_scale,
+                                     color, thickness, cv2.LINE_AA)
++                for box, (x0, y0, x1, y1) in enumerate(bottles):
++                    corner, opposite = (round(x0 * w), round(y0 * h)), (round(x1 * w), round(y1 * h))
++                    # Say whose bottle it is, or that no tracked hand is on it (so it is ignored).
++                    label = f'P{owners[box]} bottle' if box in owners else 'bottle (no hand)'
++                    cv2.rectangle(frame, corner, opposite, (20, 20, 20), thickness + 2)
++                    cv2.rectangle(frame, corner, opposite, (0, 220, 255), thickness)
++                    cv2.putText(frame, label, (corner[0], max(16, corner[1] - 8)), cv2.FONT_HERSHEY_SIMPLEX,
++                                max(.6, thickness * .3), (20, 20, 20), thickness + 2, cv2.LINE_AA)
++                    cv2.putText(frame, label, (corner[0], max(16, corner[1] - 8)), cv2.FONT_HERSHEY_SIMPLEX,
++                                max(.6, thickness * .3), (0, 220, 255), thickness, cv2.LINE_AA)
+                 message = f'{len(assignments)}/{args.people} assigned' if args.no_window else f'{len(assignments)}/{args.people} assigned | R: reassign | Q: quit'
+                 if args.zones:
+                     message = f'{len(assignments)}/{args.people} zones filled'
+                 elif tracker.positions is None:
+                     message = f'Waiting for {args.people} visible people' if args.no_window else f'Stand side by side: waiting for {args.people} visible people | Q: quit'
++                if holders:
++                    message += ' | bottle: ' + ', '.join(f'P{slot}' for slot in sorted(holders))
+                 cv2.putText(frame, message, (12, 26), cv2.FONT_HERSHEY_SIMPLEX, .55, (255, 255, 255), 2)
+                 now = time.monotonic()
+                 if now - last_preview >= .1:
+@@ -348,6 +416,8 @@ def main():
+     finally:
+         for zone_detector in zone_detectors.values():
+             zone_detector.close()
++        if bottle_detector is not None:
++            bottle_detector.close()
+         sender.sendto(b'{"version":1,"people":[]}', ('127.0.0.1', args.port))
+         sender.close()
+         camera.release()
+diff --git a/Tracking/test_bottle.py b/Tracking/test_bottle.py
+new file mode 100644
+index 0000000..e55a20c
+--- /dev/null
++++ b/Tracking/test_bottle.py
+@@ -0,0 +1,32 @@
++import unittest
++from bridge import bottle_holders
++
++
++class BottleTests(unittest.TestCase):
++    # A bottle about 4 % of the frame wide and 15 % tall, held up at P3's right (x ~ .8).
++    BOTTLE = (.78, .20, .82, .35)
++
++    def test_wrist_on_the_bottle_counts(self):
++        self.assertEqual(bottle_holders([self.BOTTLE], {3: [(.80, .33)]}), {0: 3})
++        # A wrist just below the bottle (hand wrapped around its base) still counts.
++        self.assertEqual(bottle_holders([self.BOTTLE], {3: [(.80, .42)]}), {0: 3})
++
++    def test_finger_points_count_like_wrists(self):
++        # Wrist hidden behind the bottle, but index finger and thumb are on it.
++        self.assertEqual(bottle_holders([self.BOTTLE], {3: [(.79, .27), (.81, .28)]}), {0: 3})
++
++    def test_bottle_away_from_every_hand_does_not_count(self):
++        self.assertEqual(bottle_holders([self.BOTTLE], {1: [(.15, .5)], 2: [(.5, .5)], 3: [(.80, .70)]}), {})
++        self.assertEqual(bottle_holders([], {3: [(.80, .33)]}), {})
++        self.assertEqual(bottle_holders([self.BOTTLE], {3: []}), {})
++
++    def test_nearest_hand_owns_the_bottle(self):
++        self.assertEqual(bottle_holders([self.BOTTLE], {2: [(.74, .38)], 3: [(.80, .30)]}), {0: 3})
++
++    def test_each_bottle_is_assigned_separately(self):
++        other = (.48, .40, .52, .55)
++        self.assertEqual(bottle_holders([self.BOTTLE, other], {2: [(.50, .52)], 3: [(.81, .30)]}), {0: 3, 1: 2})
++
++
++if __name__ == '__main__':
++    unittest.main()
