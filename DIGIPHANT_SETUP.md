@@ -241,8 +241,9 @@ bridge change lives only in `StudentTracking/zones.patch` (section 9).
 - [ ] Recording: short take, MP4 exported, plays with camera panel and elephant visible.
 - [ ] Three-person assignment, calibration and each role, with zones in full body and
       seated (zone mode is unit-tested and smoke-tested in MediaPipe, but not yet live).
-- [ ] Git: `Assets/StudentWork*.meta` generated and staged (107 files); first
-      commit, remote and push still to do.
+- [x] Git: first commit `85d6f9b` (178 files) pushed 2026-10-09 to
+      https://github.com/joykeeee/CatNapClub (public, `main`). The
+      `*_BeforeSavannah.unity` backup scene is left uncommitted.
 - [ ] Drive upload and link in README.
 
 ## 9. Restore from a fresh checkout of this repository
